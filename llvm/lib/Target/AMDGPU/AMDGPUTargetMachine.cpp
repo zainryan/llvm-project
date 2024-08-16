@@ -33,6 +33,7 @@
 #include "SIMachineScheduler.h"
 #include "TargetInfo/AMDGPUTargetInfo.h"
 #include "Utils/AMDGPUBaseInfo.h"
+#include "Utils/AMDGPUDumpPreRegAllocCode.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
@@ -1390,6 +1391,8 @@ bool GCNPassConfig::addRegAssignAndRewriteFast() {
 
   addPass(&GCNPreRALongBranchRegID);
 
+  addPass(new AMDGPUDumpPreRegAllocCode());
+
   addPass(createSGPRAllocPass(false));
 
   // Equivalent of PEI for SGPRs.
@@ -1407,6 +1410,8 @@ bool GCNPassConfig::addRegAssignAndRewriteOptimized() {
     report_fatal_error(RegAllocOptNotSupportedMessage);
 
   addPass(&GCNPreRALongBranchRegID);
+
+  addPass(new AMDGPUDumpPreRegAllocCode());
 
   addPass(createSGPRAllocPass(true));
 
