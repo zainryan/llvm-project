@@ -194,7 +194,7 @@ class VirtRegRewriter : public MachineFunctionPass {
   LiveDebugVariables *DebugVars = nullptr;
   DenseSet<Register> RewriteRegs;
   bool ClearVirtRegs;
-  static std::unique_ptr<raw_fd_ostream> DumpRegAllocFile;
+  static std::unique_ptr<raw_fd_ostream> WriteRegAllocFile;
   std::set<Register> RegAllocDedup;
 
   void rewrite();
@@ -225,7 +225,7 @@ public:
 } // end anonymous namespace
 
 char VirtRegRewriter::ID = 0;
-std::unique_ptr<raw_fd_ostream> VirtRegRewriter::DumpRegAllocFile;
+std::unique_ptr<raw_fd_ostream> VirtRegRewriter::WriteRegAllocFile;
 
 char &llvm::VirtRegRewriterID = VirtRegRewriter::ID;
 
@@ -242,24 +242,24 @@ INITIALIZE_PASS_END(VirtRegRewriter, "virtregrewriter",
 VirtRegRewriter::VirtRegRewriter(bool ClearVirtRegs_) :
   MachineFunctionPass(ID), ClearVirtRegs(ClearVirtRegs_) {
 
-  static bool InitDumpFile;
-  if (InitDumpFile) {
+  static bool InitWriteFile;
+  if (InitWriteFile) {
     return;
   }
-  InitDumpFile = true;
+  InitWriteFile = true;
 
-  const char *DumpFileName = std::getenv("DUMP_REG_ALLOC_FILE");
-  if (!DumpFileName) {
+  const char *WriteFileName = std::getenv("DUMP_REG_ALLOC_FILE");
+  if (!WriteFileName) {
     return;
   }
 
   // Open the file specified by the environment variable
   std::error_code EC;
-  DumpRegAllocFile.reset(new raw_fd_ostream(DumpFileName, EC, sys::fs::OF_Text));
+  WriteRegAllocFile.reset(new raw_fd_ostream(WriteFileName, EC, sys::fs::OF_Text));
 
   if (EC) {
-    errs() << "Error opening file " << DumpFileName << ": " << EC.message() << "\n";
-    DumpRegAllocFile.reset();
+    errs() << "Error opening file " << WriteFileName << ": " << EC.message() << "\n";
+    WriteRegAllocFile.reset();
   }
 }
 
@@ -586,9 +586,9 @@ void VirtRegRewriter::rewrite() {
         RewriteRegs.insert(PhysReg);
         assert(!MRI->isReserved(PhysReg) && "Reserved register assignment");
 
-	if (DumpRegAllocFile && !RegAllocDedup.count(VirtReg)) {
+	if (WriteRegAllocFile && !RegAllocDedup.count(VirtReg)) {
 	  RegAllocDedup.insert(VirtReg);
-	  *DumpRegAllocFile << printReg(VirtReg, TRI) << "->"
+	  *WriteRegAllocFile << printReg(VirtReg, TRI) << "->"
 			    << printReg(PhysReg, TRI) << "\n";
 	}
 
