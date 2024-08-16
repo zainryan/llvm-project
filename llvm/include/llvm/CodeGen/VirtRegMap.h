@@ -21,7 +21,9 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TileShapeInfo.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cassert>
+#include <memory>
 
 namespace llvm {
 

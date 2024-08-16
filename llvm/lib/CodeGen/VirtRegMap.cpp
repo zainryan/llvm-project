@@ -41,9 +41,12 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FileSystem.h"
 #include <cassert>
 #include <iterator>
 #include <utility>
+#include <cstdlib>
+#include <set>
 
 using namespace llvm;
 
@@ -191,6 +194,8 @@ class VirtRegRewriter : public MachineFunctionPass {
   LiveDebugVariables *DebugVars = nullptr;
   DenseSet<Register> RewriteRegs;
   bool ClearVirtRegs;
+  static std::unique_ptr<raw_fd_ostream> DumpRegAllocFile;
+  std::set<Register> RegAllocDedup;
 
   void rewrite();
   void addMBBLiveIns();
@@ -202,10 +207,7 @@ class VirtRegRewriter : public MachineFunctionPass {
 
 public:
   static char ID;
-  VirtRegRewriter(bool ClearVirtRegs_ = true) :
-    MachineFunctionPass(ID),
-    ClearVirtRegs(ClearVirtRegs_) {}
-
+  VirtRegRewriter(bool ClearVirtRegs_ = true);
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
   bool runOnMachineFunction(MachineFunction&) override;
@@ -223,6 +225,7 @@ public:
 } // end anonymous namespace
 
 char VirtRegRewriter::ID = 0;
+std::unique_ptr<raw_fd_ostream> VirtRegRewriter::DumpRegAllocFile;
 
 char &llvm::VirtRegRewriterID = VirtRegRewriter::ID;
 
@@ -235,6 +238,30 @@ INITIALIZE_PASS_DEPENDENCY(LiveStacks)
 INITIALIZE_PASS_DEPENDENCY(VirtRegMap)
 INITIALIZE_PASS_END(VirtRegRewriter, "virtregrewriter",
                     "Virtual Register Rewriter", false, false)
+
+VirtRegRewriter::VirtRegRewriter(bool ClearVirtRegs_) :
+  MachineFunctionPass(ID), ClearVirtRegs(ClearVirtRegs_) {
+
+  static bool InitDumpFile;
+  if (InitDumpFile) {
+    return;
+  }
+  InitDumpFile = true;
+
+  const char *DumpFileName = std::getenv("DUMP_REG_ALLOC_FILE");
+  if (!DumpFileName) {
+    return;
+  }
+
+  // Open the file specified by the environment variable
+  std::error_code EC;
+  DumpRegAllocFile.reset(new raw_fd_ostream(DumpFileName, EC, sys::fs::OF_Text));
+
+  if (EC) {
+    errs() << "Error opening file " << DumpFileName << ": " << EC.message() << "\n";
+    DumpRegAllocFile.reset();
+  }
+}
 
 void VirtRegRewriter::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
@@ -558,6 +585,12 @@ void VirtRegRewriter::rewrite() {
 
         RewriteRegs.insert(PhysReg);
         assert(!MRI->isReserved(PhysReg) && "Reserved register assignment");
+
+	if (DumpRegAllocFile && !RegAllocDedup.count(VirtReg)) {
+	  RegAllocDedup.insert(VirtReg);
+	  *DumpRegAllocFile << printReg(VirtReg, TRI) << "->"
+			    << printReg(PhysReg, TRI) << "\n";
+	}
 
         // Preserve semantics of sub-register operands.
         unsigned SubReg = MO.getSubReg();
