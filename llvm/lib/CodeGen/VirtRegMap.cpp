@@ -42,11 +42,15 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 #include <iterator>
 #include <utility>
 #include <cstdlib>
 #include <set>
+#include <fstream>
+#include <sstream>
+#include <optional>
 
 using namespace llvm;
 
@@ -195,7 +199,7 @@ class VirtRegRewriter : public MachineFunctionPass {
   DenseSet<Register> RewriteRegs;
   bool ClearVirtRegs;
   static std::unique_ptr<raw_fd_ostream> WriteRegAllocFile;
-  std::set<Register> RegAllocDedup;
+  static std::map<std::string, std::string> RegAllocMapping;
 
   void rewrite();
   void addMBBLiveIns();
@@ -204,6 +208,8 @@ class VirtRegRewriter : public MachineFunctionPass {
   void handleIdentityCopy(MachineInstr &MI);
   void expandCopyBundle(MachineInstr &MI) const;
   bool subRegLiveThrough(const MachineInstr &MI, MCRegister SuperPhysReg) const;
+  void readAndParseRegAllocFile(const char *ReadFileName);
+  void loadParsedRegAllocResult();
 
 public:
   static char ID;
@@ -226,6 +232,7 @@ public:
 
 char VirtRegRewriter::ID = 0;
 std::unique_ptr<raw_fd_ostream> VirtRegRewriter::WriteRegAllocFile;
+std::map<std::string, std::string> VirtRegRewriter::RegAllocMapping;
 
 char &llvm::VirtRegRewriterID = VirtRegRewriter::ID;
 
@@ -242,24 +249,28 @@ INITIALIZE_PASS_END(VirtRegRewriter, "virtregrewriter",
 VirtRegRewriter::VirtRegRewriter(bool ClearVirtRegs_) :
   MachineFunctionPass(ID), ClearVirtRegs(ClearVirtRegs_) {
 
-  static bool InitWriteFile;
-  if (InitWriteFile) {
+  static bool InitFiles;
+  if (InitFiles) {
     return;
   }
-  InitWriteFile = true;
+  InitFiles = true;
 
-  const char *WriteFileName = std::getenv("DUMP_REG_ALLOC_FILE");
-  if (!WriteFileName) {
+  const char *ReadFileName = std::getenv("READ_REG_ALLOC_FILE");
+  if (ReadFileName) {
+    readAndParseRegAllocFile(ReadFileName);
+    // Ignore the write file when the read file is present.
     return;
   }
 
-  // Open the file specified by the environment variable
-  std::error_code EC;
-  WriteRegAllocFile.reset(new raw_fd_ostream(WriteFileName, EC, sys::fs::OF_Text));
+  const char *WriteFileName = std::getenv("WRITE_REG_ALLOC_FILE");
+  if (WriteFileName) {
+    std::error_code EC;
+    WriteRegAllocFile.reset(new raw_fd_ostream(WriteFileName, EC, sys::fs::OF_Text));
 
-  if (EC) {
-    errs() << "Error opening file " << WriteFileName << ": " << EC.message() << "\n";
-    WriteRegAllocFile.reset();
+    if (EC) {
+      errs() << "Error opening file " << WriteFileName << ": " << EC.message() << "\n";
+      WriteRegAllocFile.reset();
+    }
   }
 }
 
@@ -280,6 +291,53 @@ void VirtRegRewriter::getAnalysisUsage(AnalysisUsage &AU) const {
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
+std::optional<unsigned> findRegByString(const std::string &RegStr,
+					const MachineFunction &MF) {
+    const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+
+    // Check Virtual Registers
+    for (unsigned Reg = 0; Reg < MRI.getNumVirtRegs(); ++Reg) {
+        unsigned VirtReg = Register::index2VirtReg(Reg);
+        std::string str;
+        raw_string_ostream RegOS(str);
+        RegOS << printReg(VirtReg, TRI);
+
+        if (RegOS.str() == RegStr) {
+            return VirtReg;  // Found the matching VirtReg
+        }
+    }
+
+    // Check Physical Registers
+    for (unsigned Reg = 0; Reg < TRI->getNumRegs(); ++Reg) {
+      if (Register::isPhysicalRegister(Reg)) {
+            std::string str;
+            raw_string_ostream RegOS(str);
+            RegOS << printReg(Reg, TRI);
+
+            if (RegOS.str() == RegStr) {
+                return Reg;  // Found the matching PhyReg
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+void VirtRegRewriter::loadParsedRegAllocResult() {
+  for (const auto &[VRegStr, PRegStr]: RegAllocMapping) {
+    auto OptionalVReg = findRegByString(VRegStr, *MF);
+    auto OptionalPReg = findRegByString(PRegStr, *MF);
+    if (!OptionalVReg.has_value()) {
+      report_fatal_error("Error: Specified VReg doesn't exist");
+    }
+    if (!OptionalPReg.has_value()) {
+      report_fatal_error("Error: Specified PReg doesn't exist");
+    }
+    VRM->assignVirt2Phys(*OptionalVReg, *OptionalPReg);
+  }
+}
+
 bool VirtRegRewriter::runOnMachineFunction(MachineFunction &fn) {
   MF = &fn;
   TRI = MF->getSubtarget().getRegisterInfo();
@@ -292,6 +350,10 @@ bool VirtRegRewriter::runOnMachineFunction(MachineFunction &fn) {
   LLVM_DEBUG(dbgs() << "********** REWRITE VIRTUAL REGISTERS **********\n"
                     << "********** Function: " << MF->getName() << '\n');
   LLVM_DEBUG(VRM->dump());
+
+  if (!RegAllocMapping.empty()) {
+    loadParsedRegAllocResult();
+  }
 
   // Add kill flags while we still have virtual registers.
   LIS->addKillFlags(VRM);
@@ -559,6 +621,35 @@ bool VirtRegRewriter::subRegLiveThrough(const MachineInstr &MI,
   return false;
 }
 
+void VirtRegRewriter::readAndParseRegAllocFile(const char *ReadFileName) {
+  std::ifstream FileStream(ReadFileName);
+
+  if (!FileStream.is_open()) {
+    report_fatal_error(Twine("Error: Could not open file ") +
+		       ReadFileName);
+  }
+
+  std::string Line;
+  while (std::getline(FileStream, Line)) {
+    std::istringstream LineStream(Line);
+    std::string VRegStr, PRegStr;
+
+    // Assuming the format is "vreg preg" on each line
+    if (LineStream >> VRegStr >> PRegStr) {
+      RegAllocMapping[VRegStr] = PRegStr;
+    } else {
+      errs() << "Warning: Malformed line in " << ReadFileName << ": " << Line << "\n";
+    }
+  }
+}
+
+std::string printableToString(const Printable &P) {
+  std::string Result;
+  raw_string_ostream Stream(Result);
+  Stream << P;
+  return Stream.str();
+}
+
 void VirtRegRewriter::rewrite() {
   bool NoSubRegLiveness = !MRI->subRegLivenessEnabled();
   SmallVector<Register, 8> SuperDeads;
@@ -586,10 +677,11 @@ void VirtRegRewriter::rewrite() {
         RewriteRegs.insert(PhysReg);
         assert(!MRI->isReserved(PhysReg) && "Reserved register assignment");
 
-	if (WriteRegAllocFile && !RegAllocDedup.count(VirtReg)) {
-	  RegAllocDedup.insert(VirtReg);
-	  *WriteRegAllocFile << printReg(VirtReg, TRI) << "->"
-			    << printReg(PhysReg, TRI) << "\n";
+	auto VirtRegStr = printableToString(printReg(VirtReg, TRI));
+	auto PhysRegStr = printableToString(printReg(PhysReg, TRI));
+	if (WriteRegAllocFile && !RegAllocMapping.count(VirtRegStr)) {
+	  RegAllocMapping[VirtRegStr] = PhysRegStr;
+	  *WriteRegAllocFile << VirtRegStr << " " << PhysRegStr << "\n";
 	}
 
         // Preserve semantics of sub-register operands.

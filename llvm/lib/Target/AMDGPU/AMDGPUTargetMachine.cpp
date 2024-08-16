@@ -967,6 +967,8 @@ public:
   void addPostRegAlloc() override;
   void addPreSched2() override;
   void addPreEmitPass() override;
+
+  bool hasSpecifiedRegAllocResult() const;
 };
 
 } // end anonymous namespace
@@ -1161,6 +1163,19 @@ MachineFunctionInfo *R600TargetMachine::createMachineFunctionInfo(
 //===----------------------------------------------------------------------===//
 // GCN Pass Setup
 //===----------------------------------------------------------------------===//
+
+bool GCNPassConfig::hasSpecifiedRegAllocResult() const {
+  static bool initialized;
+  static bool hasSpecified;
+
+  if (!initialized) {
+    initialized = true;
+    auto *fileName = std::getenv("READ_REG_ALLOC_FILE");
+    hasSpecified = fileName;
+  }
+
+  return hasSpecified;
+}
 
 ScheduleDAGInstrs *GCNPassConfig::createMachineScheduler(
   MachineSchedContext *C) const {
@@ -1393,15 +1408,19 @@ bool GCNPassConfig::addRegAssignAndRewriteFast() {
 
   addPass(new AMDGPUDumpPreRegAllocCode());
 
-  addPass(createSGPRAllocPass(false));
+  if (!hasSpecifiedRegAllocResult()) {
+    addPass(createSGPRAllocPass(false));
 
-  // Equivalent of PEI for SGPRs.
-  addPass(&SILowerSGPRSpillsID);
-  addPass(&SIPreAllocateWWMRegsID);
+    // Equivalent of PEI for SGPRs.
+    addPass(&SILowerSGPRSpillsID);
+    addPass(&SIPreAllocateWWMRegsID);
 
-  addPass(createVGPRAllocPass(false));
+    addPass(createVGPRAllocPass(false));
 
-  addPass(&SILowerWWMCopiesID);
+    addPass(&SILowerWWMCopiesID);
+  } else {
+    addPass(createVirtRegRewriter(true));
+  }
   return true;
 }
 
@@ -1413,24 +1432,28 @@ bool GCNPassConfig::addRegAssignAndRewriteOptimized() {
 
   addPass(new AMDGPUDumpPreRegAllocCode());
 
-  addPass(createSGPRAllocPass(true));
+  if (!hasSpecifiedRegAllocResult()) {
+    addPass(createSGPRAllocPass(true));
 
-  // Commit allocated register changes. This is mostly necessary because too
-  // many things rely on the use lists of the physical registers, such as the
-  // verifier. This is only necessary with allocators which use LiveIntervals,
-  // since FastRegAlloc does the replacements itself.
-  addPass(createVirtRegRewriter(false));
+    // Commit allocated register changes. This is mostly necessary because too
+    // many things rely on the use lists of the physical registers, such as the
+    // verifier. This is only necessary with allocators which use LiveIntervals,
+    // since FastRegAlloc does the replacements itself.
+    addPass(createVirtRegRewriter(false));
 
-  // Equivalent of PEI for SGPRs.
-  addPass(&SILowerSGPRSpillsID);
-  addPass(&SIPreAllocateWWMRegsID);
+    // Equivalent of PEI for SGPRs.
+    addPass(&SILowerSGPRSpillsID);
+    addPass(&SIPreAllocateWWMRegsID);
 
-  addPass(createVGPRAllocPass(true));
+    addPass(createVGPRAllocPass(true));
 
-  addPreRewrite();
-  addPass(&VirtRegRewriterID);
+    addPreRewrite();
+    addPass(&VirtRegRewriterID);
 
-  addPass(&AMDGPUMarkLastScratchLoadID);
+    addPass(&AMDGPUMarkLastScratchLoadID);
+  } else {
+    addPass(createVirtRegRewriter(true));
+  }
 
   return true;
 }
