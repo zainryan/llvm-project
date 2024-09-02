@@ -1,9 +1,10 @@
 #include "AMDGPUDumpPreRegAllocCode.h"
+#include "llvm/CodeGen/MIRPrinter.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineInstr.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <string>
 
@@ -27,15 +28,8 @@ bool AMDGPUDumpPreRegAllocCode::runOnMachineFunction(MachineFunction &MF) {
     return false;
   }
 
-  // Dump the machine code to the file
-  DumpFile << "Pre-RegAlloc Machine Code for function: " << MF.getName() << "\n";
-
-  for (auto &MBB : MF) {
-    DumpFile << "Basic Block: " << MBB.getName() << "\n";
-    for (auto &MI : MBB) {
-      MI.print(DumpFile);
-    }
-  }
+  // Dump the MIR to the file
+  printMIR(DumpFile, MF);
 
   return false;
 }
